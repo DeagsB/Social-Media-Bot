@@ -48,6 +48,42 @@ class PostGenerator:
         if not topic:
             raise ValueError("topic required")
 
+        # If AI is enabled in settings, try using ChatGPT to generate a brand-aligned post
+        try:
+            from storage import get_setting
+
+            if get_setting("ENABLE_AI") == "1":
+                try:
+                    from ai_client import AIClient
+
+                    client = AIClient()
+                    # build a clear prompt that includes brand keywords and banned words
+                    prompt_parts = [
+                        f"Write a short social media post about: {topic}",
+                        f"Tone: {tone}",
+                        "Do NOT include promotions or discount language.",
+                    ]
+                    if brand:
+                        if brand.keywords:
+                            prompt_parts.append("Include these brand keywords when appropriate: " + ", ".join(brand.keywords))
+                        if brand.banned:
+                            prompt_parts.append("Never use these words/phrases: " + ", ".join(brand.banned))
+                    prompt = "\n".join(prompt_parts)
+                    ai_text = client.generate_text(prompt=prompt, max_tokens=120)
+                    # guard against promo words and banned words
+                    lowered = ai_text.lower()
+                    banned = set((brand.banned if brand else []) + PROMO_WORDS)
+                    if any(re.search(r"\b" + re.escape(b) + r"\b", lowered) for b in banned):
+                        # fall back to rule-based
+                        raise RuntimeError("AI output contained banned words; falling back")
+                    return ai_text[:280]
+                except Exception:
+                    # if AI client fails for any reason, continue to template generation
+                    pass
+        except Exception:
+            # if storage isn't available, ignore and continue
+            pass
+
         # create candidate posts until one passes the promo filter
         attempts = 0
         while attempts < 10:

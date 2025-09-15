@@ -180,7 +180,19 @@ class App:
                 return
             out = os.path.join(os.getcwd(), ".tmp_image_ai.jpg")
             try:
-                image_utils.generate_placeholder_image(prompt, out)
+                # if AI enabled in settings, use ai_client to generate a real image
+                try:
+                    from storage import get_setting
+
+                    if get_setting("ENABLE_AI") == "1":
+                        from ai_client import AIClient
+
+                        client = AIClient()
+                        client.generate_image(prompt, out, size="1024x1024")
+                    else:
+                        image_utils.generate_placeholder_image(prompt, out)
+                except Exception:
+                    image_utils.generate_placeholder_image(prompt, out)
                 self.selected_image_path = out
                 self.selected_image_label.config(text=os.path.basename(out))
             except Exception as e:
@@ -271,6 +283,12 @@ class App:
         tk.Label(win, text="Facebook Page Access Token:").pack(anchor="w", padx=8, pady=(8, 0))
         fb_token = tk.Entry(win)
         fb_token.pack(fill="x", padx=8)
+        tk.Label(win, text="OpenAI API Key (optional):").pack(anchor="w", padx=8, pady=(8, 0))
+        openai_key = tk.Entry(win)
+        openai_key.pack(fill="x", padx=8)
+        tk.Label(win, text="Enable ChatGPT generation:").pack(anchor="w", padx=8, pady=(8, 0))
+        enable_ai = tk.BooleanVar(value=False)
+        tk.Checkbutton(win, text="Enable AI (ChatGPT) generation", variable=enable_ai).pack(anchor="w", padx=8)
 
         # load existing
         try:
@@ -286,6 +304,11 @@ class App:
             pass
         fb_page.insert(0, storage.get_setting("FB_PAGE_ID") or "")
         fb_token.insert(0, storage.get_setting("FB_ACCESS_TOKEN") or "")
+        openai_key.insert(0, storage.get_setting("OPENAI_API_KEY") or "")
+        try:
+            enable_ai.set(storage.get_setting("ENABLE_AI") == "1")
+        except Exception:
+            enable_ai.set(False)
 
         def save():
             import json
@@ -298,6 +321,8 @@ class App:
             storage.set_setting("BRAND_PROFILE", json.dumps(j))
             storage.set_setting("FB_PAGE_ID", fb_page.get().strip())
             storage.set_setting("FB_ACCESS_TOKEN", fb_token.get().strip())
+            storage.set_setting("OPENAI_API_KEY", openai_key.get().strip())
+            storage.set_setting("ENABLE_AI", "1" if enable_ai.get() else "0")
             messagebox.showinfo("Saved", "Settings saved")
 
         tk.Button(win, text="Save", command=save).pack(pady=12)
