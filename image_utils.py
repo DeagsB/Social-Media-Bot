@@ -1,6 +1,11 @@
 import os
 from PIL import Image, ImageDraw, ImageFont
 import requests
+from urllib.parse import quote_plus
+import json
+import os
+import time
+import hashlib
 
 
 def generate_placeholder_image(text: str, out_path: str, size=(800, 450)):
@@ -74,3 +79,96 @@ def hamming_distance_hex(a: str, b: str) -> int:
         return bin(x).count("1")
     except Exception:
         return 999
+
+
+def search_images_unsplash(query: str, max_results: int = 6) -> list:
+    """Search Unsplash for the query. Requires UNSPLASH_ACCESS_KEY env var.
+
+    Returns list of dicts: {url, thumbnail, source, attribution}
+    """
+    key = os.getenv("UNSPLASH_ACCESS_KEY")
+    if not key:
+        return []
+    try:
+        url = f"https://api.unsplash.com/search/photos?query={quote_plus(query)}&per_page={max_results}"
+        headers = {"Authorization": f"Client-ID {key}"}
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        js = r.json()
+        out = []
+        for it in js.get("results", [])[:max_results]:
+            out.append({
+                "url": it.get("urls", {}).get("full"),
+                "thumbnail": it.get("urls", {}).get("small"),
+                "source": "unsplash",
+                "attribution": it.get("user", {}).get("name"),
+            })
+        return out
+    except Exception:
+        return []
+
+
+def search_images_duckduckgo(query: str, max_results: int = 6) -> list:
+    """Fallback image search using DuckDuckGo's unofficial JSON endpoint."""
+    out = []
+    try:
+        params = {"q": query}
+        headers = {"User-Agent": "SocialBot/1.0"}
+        r = requests.get("https://duckduckgo.com/i.js", params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        results = data.get("results", []) if isinstance(data, dict) else []
+        for it in results[:max_results]:
+            out.append({
+                "url": it.get("image"),
+                "thumbnail": it.get("thumbnail") or it.get("image"),
+                "source": "duckduckgo",
+                "attribution": None,
+            })
+    except Exception:
+        pass
+    return out
+
+
+def search_images(query: str, max_results: int = 6) -> list:
+    """Try Unsplash first, then fallback to DuckDuckGo."""
+    # simple file-based TTL cache to avoid repeating search API calls
+    try:
+        cache_dir = os.path.join(os.getcwd(), ".image_search_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        key = hashlib.sha256((query + str(max_results)).encode("utf-8")).hexdigest()
+        cache_file = os.path.join(cache_dir, key + ".json")
+        ttl = 60 * 60 * 12  # 12 hours
+        if os.path.exists(cache_file):
+            stat = os.path.getmtime(cache_file)
+            if time.time() - stat < ttl:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    try:
+                        return json.load(f)
+                    except Exception:
+                        pass
+    except Exception:
+        cache_file = None
+
+    res = search_images_unsplash(query, max_results)
+    if not res:
+        res = search_images_duckduckgo(query, max_results)
+
+    try:
+        if cache_file and res:
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(res, f)
+    except Exception:
+        pass
+    return res
+
+
+def download_image_to(path: str, url: str) -> str:
+    """Download an image URL to a local path. Returns the path."""
+    r = requests.get(url, stream=True, timeout=15, headers={"User-Agent": "SocialBot/1.0"})
+    r.raise_for_status()
+    with open(path, "wb") as f:
+        for chunk in r.iter_content(8192):
+            if chunk:
+                f.write(chunk)
+    return path

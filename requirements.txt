@@ -2,3 +2,6 @@ tk
 requests
 Pillow
 openai
+# Optional, used if local HF models or diffusers are available
+pytest
+python-dotenv

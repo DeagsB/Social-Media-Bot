@@ -55,43 +55,31 @@ class PostGenerator:
         if len(topic) > 100:
             topic = topic[:100].rstrip()
 
-        # If AI is enabled in settings, try using ChatGPT to generate a brand-aligned post
+        # If AI is enabled in settings, use the OpenAI-only agent pipeline (generate->critique->refine)
         try:
             from storage import get_setting
 
             if get_setting("ENABLE_AI") == "1":
                 try:
+                    from openai_agent import OpenAIAgent
                     from ai_client import AIClient
 
-                    client = AIClient()
-                    # build a clear prompt that includes brand keywords and banned words
-                    prompt_parts = [
-                        f"Write a short social media post about: {topic}",
-                        f"Tone: {tone}",
-                        "Do NOT include promotions or discount language.",
-                    ]
-                    if brand:
-                        if brand.keywords:
-                            prompt_parts.append("Include these brand keywords when appropriate: " + ", ".join(brand.keywords))
-                        if brand.banned:
-                            prompt_parts.append("Never use these words/phrases: " + ", ".join(brand.banned))
-                    prompt = "\n".join(prompt_parts)
-                    ai_text = client.generate_text(prompt=prompt, max_tokens=120)
-                    # guard: ensure AI returned something useful
-                    if not ai_text or not ai_text.strip():
-                        raise RuntimeError("AI returned empty output; falling back")
-                    # guard against promo words and banned words using helper
-                    lowered = ai_text.lower()
-                    banned_list = (brand.banned if brand else []) + PROMO_WORDS
-                    if self._contains_promo(lowered) or any(
-                        re.search(r"\b" + re.escape(b) + r"\b", lowered) for b in (brand.banned if brand else [])
-                    ):
-                        # fall back to rule-based
-                        raise RuntimeError("AI output contained banned words; falling back")
-                    return ai_text[:280]
+                    agent = OpenAIAgent(AIClient())
+                    result = agent.generate_post(topic=topic, tone=tone, brand=(brand.__dict__ if brand else None))
+                    # OpenAIAgent returns a dict with metadata; extract final text if so
+                    if isinstance(result, dict):
+                        final_text = result.get("final") or (result.get("variants") and result.get("variants")[0])
+                        if final_text and isinstance(final_text, str) and final_text.strip():
+                            return final_text[:280]
+                    elif isinstance(result, str):
+                        if result.strip():
+                            return result[:280]
                 except Exception:
-                    # if AI client fails for any reason, continue to template generation
+                    # fall back to templates below
                     pass
+        except Exception:
+            # storage not available; fall back to templates
+            pass
         except Exception:
             # if storage isn't available, ignore and continue
             pass
@@ -147,7 +135,7 @@ class PostGenerator:
 
         topic = " ".join(parts).strip() or os.path.basename(image_record.get("path", ""))
 
-        # If AI enabled, ask AI to write a post describing the item and suggesting why a customer might like it.
+        # If AI enabled, use AIClient to write a post from image metadata
         try:
             from storage import get_setting
 
@@ -157,21 +145,20 @@ class PostGenerator:
 
                     client = AIClient()
                     prompt_parts = [
-                        f"Look at this product image and metadata: {topic}",
+                        f"Write a short social post about: {topic}",
                         f"Tags: {', '.join(image_record.get('tags', []))}",
-                        f"Write a short social post (<=280 chars) that highlights the product and why a customer would like it. Do NOT include promotions or discount language.",
+                        "Write a short social post (<=280 chars) that highlights the product and why a customer would like it. Do NOT include promotions or discount language.",
                     ]
                     if brand and brand.keywords:
                         prompt_parts.append("Use brand keywords when appropriate: " + ", ".join(brand.keywords))
                     prompt = "\n".join(p for p in prompt_parts if p)
                     ai_text = client.generate_text(prompt=prompt, max_tokens=140)
-                    if not ai_text or not ai_text.strip():
-                        raise RuntimeError("AI returned empty output; falling back")
-                    lowered = ai_text.lower()
-                    banned_list = (brand.banned if brand else []) + PROMO_WORDS
-                    if self._contains_promo(lowered) or any(re.search(r"\b" + re.escape(b) + r"\b", lowered) for b in (brand.banned if brand else [])):
-                        raise RuntimeError("AI output contained banned words; falling back")
-                    return ai_text[:280]
+                    if ai_text and ai_text.strip():
+                        lowered = ai_text.lower()
+                        if self._contains_promo(lowered) or any(re.search(r"\b" + re.escape(b) + r"\b", lowered) for b in (brand.banned if brand else [])):
+                            ai_text = None
+                        else:
+                            return ai_text[:280]
                 except Exception:
                     pass
         except Exception:
@@ -185,3 +172,84 @@ class PostGenerator:
         if self._contains_promo(post.lower()):
             return f"{random.choice(self.emojis)} Check out {base_topic}."
         return post[:280]
+
+    def generate_with_metadata(self, topic: str, tone: str = "friendly", brand: BrandProfile = None) -> dict:
+        """Return structured metadata for a generated post: variants, final, hashtags, alt_text, moderation."""
+        try:
+            from storage import get_setting
+
+            if get_setting("ENABLE_AI") == "1":
+                try:
+                    from openai_agent import OpenAIAgent
+                    from ai_client import AIClient
+
+                    agent = OpenAIAgent(AIClient())
+                    return agent.generate_post(topic=topic, tone=tone, brand=(brand.__dict__ if brand else None))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # fallback: simple metadata from template
+        post = self.generate(topic=topic, tone=tone, brand=brand)
+        return {
+            "variants": [post],
+            "final": post,
+            "hashtags": [],
+            "alt_text": None,
+            "moderation": {"ok": True, "issues": []},
+        }
+
+    def get_image_suggestions(self, ai_client, post_text: str, alt_text: str = None, hashtags: list = None, n_queries: int = 2, max_results: int = 6) -> list:
+        """Generate image search queries using the ai_client and return aggregated image search results.
+
+        Returns a list of candidate dicts with keys: url, thumbnail, source, attribution
+        """
+        # build prompt to ask AI for short image search queries
+        try:
+            prompt = (
+                f"Produce {n_queries} short image search queries (2-6 words each) to find photos matching this social media post.\n\n"
+                f"Post: {post_text}\nAlt: {alt_text or ''}\nHashtags: {', '.join(hashtags or [])}\n\nReturn a JSON array of strings only."
+            )
+            out = ai_client.generate_text(prompt=prompt, max_tokens=120, temperature=0.2)
+        except Exception:
+            out = None
+
+        queries = []
+        if out:
+            import json, re
+
+            try:
+                m = re.search(r"(\[.*\])", out, re.S)
+                if m:
+                    arr = json.loads(m.group(1))
+                    queries = [a.strip() for a in arr if isinstance(a, str)]
+                else:
+                    lines = [l.strip("-• \t") for l in out.splitlines() if l.strip()]
+                    queries = [l for l in lines if len(l.split()) <= 6][:n_queries]
+            except Exception:
+                queries = []
+
+        if not queries:
+            # fallback: derive simple queries from post_text
+            tokens = post_text.split()
+            queries = [" ".join(tokens[:4]), " ".join(tokens[-4:])] if len(tokens) > 1 else [post_text]
+
+        # search for each query and aggregate
+        results = []
+        try:
+            import image_utils
+
+            for q in queries[:n_queries]:
+                found = image_utils.search_images(q, max_results=max_results)
+                for f in found:
+                    # avoid duplicates by url
+                    if not any(existing.get("url") == f.get("url") for existing in results):
+                        results.append(f)
+                        if len(results) >= max_results:
+                            break
+                if len(results) >= max_results:
+                    break
+        except Exception:
+            pass
+        return results

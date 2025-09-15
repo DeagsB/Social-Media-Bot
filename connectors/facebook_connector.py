@@ -31,10 +31,10 @@ class FacebookConnector:
         self.access_token = token
         self.dry_run = bool(dry_run)
 
-    def post(self, message: str, image_path: str = None) -> dict:
+    def post(self, message: str, image_path: str = None, alt_text: str = None, hashtags: list = None) -> dict:
         if self.dry_run:
             # Simulate a successful post response
-            return {"status": "dry_run", "message": message, "image": image_path}
+            return {"status": "dry_run", "message": message, "image": image_path, "alt_text": alt_text, "hashtags": hashtags}
 
         if not self.page_id or not self.access_token:
             raise RuntimeError("FB_PAGE_ID and FB_ACCESS_TOKEN must be set for real posting")
@@ -45,7 +45,7 @@ class FacebookConnector:
         if image_path:
             # If the Graph API requires multipart upload use 'source' instead (not implemented here)
             files = {"source": open(image_path, "rb")}
-
+        # Note: to attach alt text you would need to call the media endpoint with 'alt_text' metadata as supported by the Graph API.
         resp = requests.post(url, data=payload, files=files, timeout=30)
         if files:
             files["source"].close()

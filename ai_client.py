@@ -136,3 +136,62 @@ class AIClient:
                 return out_path
             except Exception:
                 raise
+
+        def moderate_text(self, text: str) -> dict:
+            """Run OpenAI moderation on the provided text.
+
+            Returns a dict with at least the keys:
+              - flagged: bool
+              - categories: dict (category->bool)
+              - raw: original API response (if available)
+
+            The method supports both the modern OpenAI client and the legacy package.
+            If moderation is not available or an error occurs, returns a conservative
+            response marking the content as not flagged and including the exception
+            text in `raw`.
+            """
+            try:
+                if self._client_type == "modern":
+                    # modern client has moderation under moderation.create
+                    try:
+                        resp = self._client.moderations.create(input=text)
+                        # modern responses may include `results` list
+                        results = getattr(resp, "results", None) or getattr(resp, "output", None) or resp
+                        # normalize
+                        first = None
+                        if isinstance(results, (list, tuple)) and len(results) > 0:
+                            first = results[0]
+                        elif isinstance(results, dict):
+                            first = results
+                        flagged = False
+                        categories = {}
+                        if first:
+                            flagged = first.get("flagged", False) if isinstance(first, dict) else bool(getattr(first, "flagged", False))
+                            cats = first.get("categories", {}) if isinstance(first, dict) else getattr(first, "categories", {})
+                            categories = dict(cats or {})
+                        return {"flagged": bool(flagged), "categories": categories, "raw": resp}
+                    except Exception:
+                        # some modern clients expose moderation under client.moderation
+                        resp = self._client.moderation.create(input=text)
+                        results = getattr(resp, "results", None) or resp
+                        first = results[0] if isinstance(results, (list, tuple)) and len(results) > 0 else results
+                        flagged = first.get("flagged", False) if isinstance(first, dict) else bool(getattr(first, "flagged", False))
+                        categories = first.get("categories", {}) if isinstance(first, dict) else getattr(first, "categories", {})
+                        return {"flagged": bool(flagged), "categories": dict(categories or {}), "raw": resp}
+                else:
+                    # legacy openai package
+                    try:
+                        resp = self._client.Moderation.create(input=text)
+                    except Exception:
+                        # older versions used moderation.create
+                        resp = self._client.moderation.create(input=text)
+                    results = resp.get("results") or resp
+                    first = results[0] if isinstance(results, (list, tuple)) and len(results) > 0 else results
+                    flagged = False
+                    categories = {}
+                    if isinstance(first, dict):
+                        flagged = first.get("flagged", False)
+                        categories = first.get("categories", {}) or {}
+                    return {"flagged": bool(flagged), "categories": dict(categories), "raw": resp}
+            except Exception as ex:
+                return {"flagged": False, "categories": {}, "raw": f"moderation_error: {ex}"}
