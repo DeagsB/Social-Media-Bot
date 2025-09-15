@@ -80,6 +80,7 @@ class App:
         self.dry_run_var = tk.BooleanVar(value=True)
         tk.Checkbutton(conn_frame, text="Dry run (no network)", variable=self.dry_run_var).pack(side="left", padx=8)
         tk.Button(conn_frame, text="Settings", command=self.open_settings).pack(side="right")
+        tk.Button(conn_frame, text="Image Library", command=self.open_image_library).pack(side="right", padx=8)
 
         # start a background poller for scheduled posts
         self._stop_poller = False
@@ -286,6 +287,9 @@ class App:
         tk.Label(win, text="OpenAI API Key (optional):").pack(anchor="w", padx=8, pady=(8, 0))
         openai_key = tk.Entry(win)
         openai_key.pack(fill="x", padx=8)
+        tk.Label(win, text="Hugging Face API Token (optional):").pack(anchor="w", padx=8, pady=(8, 0))
+        hf_key = tk.Entry(win)
+        hf_key.pack(fill="x", padx=8)
         tk.Label(win, text="Enable ChatGPT generation:").pack(anchor="w", padx=8, pady=(8, 0))
         enable_ai = tk.BooleanVar(value=False)
         tk.Checkbutton(win, text="Enable AI (ChatGPT) generation", variable=enable_ai).pack(anchor="w", padx=8)
@@ -305,6 +309,7 @@ class App:
         fb_page.insert(0, storage.get_setting("FB_PAGE_ID") or "")
         fb_token.insert(0, storage.get_setting("FB_ACCESS_TOKEN") or "")
         openai_key.insert(0, storage.get_setting("OPENAI_API_KEY") or "")
+        hf_key.insert(0, storage.get_setting("HF_API_TOKEN") or "")
         try:
             enable_ai.set(storage.get_setting("ENABLE_AI") == "1")
         except Exception:
@@ -322,10 +327,175 @@ class App:
             storage.set_setting("FB_PAGE_ID", fb_page.get().strip())
             storage.set_setting("FB_ACCESS_TOKEN", fb_token.get().strip())
             storage.set_setting("OPENAI_API_KEY", openai_key.get().strip())
+            storage.set_setting("HF_API_TOKEN", hf_key.get().strip())
             storage.set_setting("ENABLE_AI", "1" if enable_ai.get() else "0")
             messagebox.showinfo("Saved", "Settings saved")
 
         tk.Button(win, text="Save", command=save).pack(pady=12)
+
+    def open_image_library(self):
+        # ensure DB
+        try:
+            import image_db
+
+            image_db.init_db()
+        except Exception:
+            messagebox.showerror("Error", "Could not initialize image DB")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Image Library")
+        win.geometry("700x500")
+
+        listbox = tk.Listbox(win)
+        listbox.pack(fill="both", expand=True, padx=8, pady=8)
+
+        def refresh_list():
+            listbox.delete(0, tk.END)
+            for img in image_db.list_images():
+                listbox.insert(tk.END, f"{img['id']}: {img['title']} ({os.path.basename(img['path'])})")
+
+        def add_image():
+            path = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp")])
+            if not path:
+                return
+            title = simpledialog.askstring("Title", "Enter title for image:") or ""
+            desc = simpledialog.askstring("Description", "Enter description (optional):") or ""
+            tags = simpledialog.askstring("Tags", "Comma separated tags (optional):") or ""
+            try:
+                image_db.add_image(path, title=title, description=desc, tags=[t.strip() for t in tags.split(",") if t.strip()], metadata={})
+                refresh_list()
+            except Exception as e:
+                messagebox.showerror("Add failed", str(e))
+
+        def view_selected():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            idx = listbox.get(sel[0])
+            image_id = int(idx.split(":", 1)[0])
+            img = image_db.get_image(image_id)
+            if not img:
+                messagebox.showerror("Not found", "Image not found")
+                return
+            # show a simple preview window
+            pv = tk.Toplevel(win)
+            pv.title(img.get("title") or f"Image {image_id}")
+            try:
+                im = Image.open(img["path"])
+                im.thumbnail((560, 360))
+                photo = ImageTk.PhotoImage(im)
+                l = tk.Label(pv, image=photo)
+                l.image = photo
+                l.pack(padx=8, pady=8)
+            except Exception:
+                tk.Label(pv, text="(Could not load image)").pack(padx=8, pady=8)
+            tk.Label(pv, text=f"Title: {img.get('title')}").pack(anchor="w", padx=8)
+            tk.Label(pv, text=f"Description: {img.get('description')}").pack(anchor="w", padx=8)
+            tk.Label(pv, text=f"Tags: {', '.join(img.get('tags', []))}").pack(anchor="w", padx=8)
+
+        def generate_from_selected():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showinfo("Select image", "Please select an image first")
+                return
+            idx = listbox.get(sel[0])
+            image_id = int(idx.split(":", 1)[0])
+            img = image_db.get_image(image_id)
+            if not img:
+                messagebox.showerror("Not found", "Image not found")
+                return
+            # build brand profile from storage
+            brand_raw = storage.get_setting("BRAND_PROFILE")
+            brand = None
+            if brand_raw:
+                try:
+                    import json
+
+                    j = json.loads(brand_raw)
+                    brand = BrandProfile(name=j.get("name", ""), keywords=j.get("keywords", []), banned=j.get("banned", []))
+                except Exception:
+                    brand = None
+            post = self.generator.generate_from_image(img, tone="friendly", brand=brand)
+            # insert into main preview
+            self.preview.delete("1.0", tk.END)
+            self.preview.insert(tk.END, post)
+
+        def find_similar():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showinfo("Select image", "Please select an image first")
+                return
+            idx = listbox.get(sel[0])
+            image_id = int(idx.split(":", 1)[0])
+            src = image_db.get_image(image_id)
+            if not src:
+                messagebox.showerror("Not found", "Image not found")
+                return
+            # simple similarity: compare average color distance and size
+            def color_dist(a, b):
+                if not a or not b:
+                    return float("inf")
+                return sum((a[i] - b[i]) ** 2 for i in range(3)) ** 0.5
+
+            candidates = []
+            for img in image_db.list_images():
+                if img["id"] == image_id:
+                    continue
+                a = src.get("metadata", {}).get("avg_color")
+                b = img.get("metadata", {}).get("avg_color")
+                d = color_dist(a, b)
+                # also size diff
+                sw = src.get("metadata", {}).get("width") or 0
+                sh = src.get("metadata", {}).get("height") or 0
+                iw = img.get("metadata", {}).get("width") or 0
+                ih = img.get("metadata", {}).get("height") or 0
+                size_diff = abs(sw - iw) + abs(sh - ih)
+                score = d + (size_diff / 100.0)
+                candidates.append((score, img))
+            candidates.sort(key=lambda x: x[0])
+            # show top 5
+            if not candidates:
+                messagebox.showinfo("No matches", "No other images to compare")
+                return
+            out = "Similar images:\n" + "\n".join([f"{c[1]['id']}: {c[1]['title']} ({os.path.basename(c[1]['path'])})" for c in candidates[:5]])
+            messagebox.showinfo("Search results", out)
+
+        def caption_selected():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showinfo("Select image", "Please select an image first")
+                return
+            idx = listbox.get(sel[0])
+            image_id = int(idx.split(":", 1)[0])
+            img = image_db.get_image(image_id)
+            if not img:
+                messagebox.showerror("Not found", "Image not found")
+                return
+            try:
+                import vision
+
+                caption = vision.caption_image(img["path"])
+                if not caption:
+                    messagebox.showinfo("Caption", "No caption available (missing model or failed).")
+                    return
+                # save caption as description
+                image_db.update_image(image_id, description=caption)
+                messagebox.showinfo("Saved", "Caption saved to image description")
+                refresh_list()
+            except Exception as e:
+                messagebox.showerror("Caption failed", str(e))
+
+        btns = tk.Frame(win)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        tk.Button(btns, text="Add Image", command=add_image).pack(side="left")
+        tk.Button(btns, text="View Selected", command=view_selected).pack(side="left", padx=8)
+        tk.Button(btns, text="Generate Post", command=generate_from_selected).pack(side="left", padx=8)
+        tk.Button(btns, text="Caption", command=caption_selected).pack(side="left", padx=8)
+        tk.Button(btns, text="Find Similar", command=find_similar).pack(side="left", padx=8)
+        tk.Button(btns, text="Refresh", command=refresh_list).pack(side="right")
+
+        refresh_list()
 
     def _poll_scheduled_loop(self):
         # simple poll loop that runs every 30 seconds
